@@ -42,16 +42,26 @@ COLLECTION_INDEX=\
 	$(COLLECTION_DIR)/log.csv\
 	$(COLLECTION_DIR)/resource.csv
 
+init::
+	@curl -o /dev/null -s -w "%{http_code}" '$(DATASTORE_URL)$(REPOSITORY)/$(COLLECTION_DIR)log.csv' > /tmp/log_status_code
+	@curl -o /dev/null -s -w "%{http_code}" '$(DATASTORE_URL)$(REPOSITORY)/$(COLLECTION_DIR)resource.csv' > /tmp/resource_status_code
+	@if [ $$(cat /tmp/log_status_code) -ne 403 ] && [ $$(cat /tmp/resource_status_code) -ne 403 ]; then \
+		curl -qfsL '$(DATASTORE_URL)$(REPOSITORY)/$(COLLECTION_DIR)log.csv' > $(COLLECTION_DIR)log.csv; \
+		curl -qfsL '$(DATASTORE_URL)$(REPOSITORY)/$(COLLECTION_DIR)resource.csv' > $(COLLECTION_DIR)resource.csv; \
+	fi
+	@rm -f /tmp/log_status_code /tmp/resource_status_code
+
+
 first-pass:: collect
 
 second-pass:: collection
 
 collect:: $(COLLECTION_CONFIG_FILES)
 	@mkdir -p $(RESOURCE_DIR)
-	digital-land collect $(ENDPOINT_CSV)
+	digital-land ${DIGITAL_LAND_OPTS} collect $(ENDPOINT_CSV)
 
 collection::
-	digital-land collection-save-csv
+	digital-land ${DIGITAL_LAND_OPTS} collection-save-csv
 
 clobber-today::
 	rm -rf $(LOG_FILES_TODAY) $(COLLECTION_INDEX)
@@ -60,7 +70,7 @@ makerules::
 	curl -qfsL '$(SOURCE_URL)/makerules/main/collection.mk' > makerules/collection.mk
 
 commit-collection::
-	git add collection
+	git add collection/log
 	git diff --quiet && git diff --staged --quiet || (git commit -m "Collection $(shell date +%F)"; git push origin $(BRANCH))
 
 load-resources::
@@ -68,6 +78,9 @@ load-resources::
 
 save-resources::
 	aws s3 sync $(RESOURCE_DIR) s3://$(COLLECTION_DATASET_BUCKET_NAME)/$(REPOSITORY)/$(RESOURCE_DIR) --no-progress
+
+save-logs::
+	aws s3 sync $(COLLECTION_DIR)log s3://$(COLLECTION_DATASET_BUCKET_NAME)/$(REPOSITORY)/$(COLLECTION_DIR)log --no-progress
 
 save-collection::
 	aws s3 cp $(COLLECTION_DIR)log.csv s3://$(COLLECTION_DATASET_BUCKET_NAME)/$(REPOSITORY)/$(COLLECTION_DIR) --no-progress

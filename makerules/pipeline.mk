@@ -81,6 +81,7 @@ PIPELINE_CONFIG_FILES=\
 	$(PIPELINE_DIR)default-value.csv\
 	$(PIPELINE_DIR)filter.csv\
 	$(PIPELINE_DIR)lookup.csv\
+	$(PIPELINE_DIR)old-entity.csv\
 	$(PIPELINE_DIR)patch.csv\
 	$(PIPELINE_DIR)skip.csv\
 	$(PIPELINE_DIR)transform.csv
@@ -88,24 +89,26 @@ endif
 
 define run-pipeline
 	mkdir -p $(@D) $(ISSUE_DIR)$(notdir $(@D)) $(COLUMN_FIELD_DIR)$(notdir $(@D)) $(DATASET_RESOURCE_DIR)$(notdir $(@D))
-	digital-land --dataset $(notdir $(@D)) $(DIGITAL_LAND_FLAGS) pipeline $(1) --issue-dir $(ISSUE_DIR)$(notdir $(@D)) --column-field-dir $(COLUMN_FIELD_DIR)$(notdir $(@D)) --dataset-resource-dir $(DATASET_RESOURCE_DIR)$(notdir $(@D)) $(PIPELINE_FLAGS) $< $@
+	digital-land ${DIGITAL_LAND_OPTS} --dataset $(notdir $(@D)) $(DIGITAL_LAND_FLAGS) pipeline $(1) --issue-dir $(ISSUE_DIR)$(notdir $(@D)) --column-field-dir $(COLUMN_FIELD_DIR)$(notdir $(@D)) --dataset-resource-dir $(DATASET_RESOURCE_DIR)$(notdir $(@D)) $(PIPELINE_FLAGS) $< $@
 endef
 
 define build-dataset =
 	mkdir -p $(@D)
-	time digital-land --dataset $(notdir $(basename $@)) dataset-create --output-path $(basename $@).sqlite3 $(^)
+	time digital-land ${DIGITAL_LAND_OPTS} --dataset $(notdir $(basename $@)) dataset-create --output-path $(basename $@).sqlite3 $(^)
 	time datasette inspect $(basename $@).sqlite3 --inspect-file=$(basename $@).sqlite3.json
-	time digital-land --dataset $(notdir $(basename $@)) dataset-entries $(basename $@).sqlite3 $@
+	time digital-land ${DIGITAL_LAND_OPTS} --dataset $(notdir $(basename $@)) dataset-entries $(basename $@).sqlite3 $@
 	mkdir -p $(FLATTENED_DIR)
-	time digital-land --dataset $(notdir $(basename $@)) dataset-entries-flattened $@ $(FLATTENED_DIR)
+	time digital-land ${DIGITAL_LAND_OPTS} --dataset $(notdir $(basename $@)) dataset-entries-flattened $@ $(FLATTENED_DIR)
 	md5sum $@ $(basename $@).sqlite3
 	csvstack $(ISSUE_DIR)$(notdir $(basename $@))/*.csv > $(basename $@)-issue.csv
 	mkdir -p $(EXPECTATION_DIR)
-	time digital-land expectations --results-path "$(EXPECTATION_DIR)$(notdir $(basename $@)).csv" --sqlite-dataset-path "$(basename $@).sqlite3" --data-quality-yaml "$(EXPECTATION_DIR)$(notdir $(basename $@)).yaml"
+	time digital-land ${DIGITAL_LAND_OPTS} expectations-dataset-checkpoint --output-dir=$(EXPECTATION_DIR) --specification-dir=specification --data-path=$(basename $@).sqlite3
+	csvstack $(EXPECTATION_DIR)/**/$(notdir $(basename $@))-results.csv > $(basename $@)-expectation-result.csv
+	csvstack $(EXPECTATION_DIR)/**/$(notdir $(basename $@))-issues.csv > $(basename $@)-expectation-issue.csv
 endef
 
 collection::
-	digital-land collection-pipeline-makerules > collection/pipeline.mk
+	digital-land ${DIGITAL_LAND_OPTS} collection-pipeline-makerules > collection/pipeline.mk
 
 -include collection/pipeline.mk
 
@@ -122,6 +125,7 @@ ifndef GDAL
 ifeq ($(UNAME),Darwin)
 	$(error GDAL tools not found in PATH)
 endif
+	sudo add-apt-repository ppa:ubuntugis/ppa
 	sudo apt-get update
 	sudo apt-get install gdal-bin
 endif
@@ -159,13 +163,13 @@ endif
 
 save-expectations::
 	@mkdir -p $(EXPECTATION_DIR)
-	aws s3 sync $(EXPECTATION_DIR) s3://$(COLLECTION_DATASET_BUCKET_NAME)/$(EXPECTATION_DIR) --exclude "*" --include "*.csv"
+	aws s3 sync $(EXPECTATION_DIR) s3://$(COLLECTION_DATASET_BUCKET_NAME)/$(EXPECTATION_DIR) --exclude "*" --include "*.csv" --no-progress
 
 # convert an individual resource
 # .. this assumes conversion is the same for every dataset, but it may not be soon
 var/converted/%.csv: collection/resource/%
 	mkdir -p var/converted/
-	digital-land convert $<
+	digital-land ${DIGITAL_LAND_OPTS} convert $<
 
 transformed::
 	@mkdir -p $(TRANSFORMED_DIR)
@@ -179,9 +183,15 @@ datasette:	metadata.json
 	--load-extension $(SPATIALITE_EXTENSION) \
 	--metadata metadata.json
 
+FALLBACK_CONFIG_URL := https://files.planning.data.gov.uk/config/pipeline/$(COLLECTION_NAME)/
+
 $(PIPELINE_DIR)%.csv:
 	@mkdir -p $(PIPELINE_DIR)
-	curl -qfsL '$(PIPELINE_CONFIG_URL)$(notdir $@)' > $@
+	@if [ ! -f $@ ]; then \
+		echo "Config file $@ not found locally. Attempting to download..."; \
+		curl -qfsL '$(PIPELINE_CONFIG_URL)$(notdir $@)' -o $@ || \
+		(echo "File not found in config repo. Attempting to download from AWS..." && curl -qfsL '$(FALLBACK_CONFIG_URL)$(notdir $@)' -o $@); \
+	fi
 
 config:: $(PIPELINE_CONFIG_FILES)
 
